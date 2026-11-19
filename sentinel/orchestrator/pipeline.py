@@ -70,9 +70,19 @@ class ScanExecutionResult:
     evidence_dir: Optional[Path] = None
     screenshots: List[str] = field(default_factory=list)
     log_files: List[str] = field(default_factory=list)
+    security_explanations: List[Dict[str, Any]] = field(default_factory=list)
+    failure_analyses: List[Dict[str, Any]] = field(default_factory=list)
+    ai_report: Optional[Any] = None
     duration_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
+        ai_report_dict = None
+        if self.ai_report is not None:
+            if hasattr(self.ai_report, "to_dict"):
+                ai_report_dict = self.ai_report.to_dict()
+            elif isinstance(self.ai_report, dict):
+                ai_report_dict = self.ai_report
+
         return {
             "scan_id": self.scan_id,
             "application_directory": self.app_dir_name,
@@ -95,6 +105,20 @@ class ScanExecutionResult:
                 "screenshots": self.screenshots,
                 "logs": self.log_files,
             },
+            "ai_insights": {
+                "security_explanations": self.security_explanations,
+                "failure_analyses": self.failure_analyses,
+                "report_summary": ai_report_dict,
+                "executive_summary": ai_report_dict.get("executive_summary", "") if ai_report_dict else "",
+                "quality_assessment": ai_report_dict.get("quality_assessment", "") if ai_report_dict else "",
+                "test_recommendations": ai_report_dict.get("test_recommendations", []) if ai_report_dict else [],
+                "critical_priorities": ai_report_dict.get("critical_priorities", []) if ai_report_dict else [],
+                "remediation_recommendations": ai_report_dict.get("remediation_recommendations", []) if ai_report_dict else [],
+                "is_ai_generated": ai_report_dict.get("is_ai_generated", False) if ai_report_dict else False,
+                "provider": ai_report_dict.get("provider_used", "") if ai_report_dict else "",
+                "model": ai_report_dict.get("model_used", "") if ai_report_dict else "",
+            },
+            "ai_report": ai_report_dict,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -180,6 +204,8 @@ class ScanPipeline:
         test_results: List[TestScenarioResult] = []
         screenshots: List[str] = []
         log_files: List[str] = []
+        security_explanations: List[Dict[str, Any]] = []
+        failure_analyses: List[Dict[str, Any]] = []
         exploration_res: Optional[ExplorationResult] = None
         auth_status = "SKIPPED"
         auth_reason = ""
@@ -187,7 +213,7 @@ class ScanPipeline:
             "startup_status": "Normal (<3.0s)",
             "skipped_frames": "None detected",
             "cpu_status": "Stable during interactive exploration",
-            "memory_summary": "Stable heap consumption",
+            "memory_summary": "Unavailable",
         }
         runtime_summary: Dict[str, str] = {
             "Installation": "SKIPPED",
@@ -223,6 +249,7 @@ class ScanPipeline:
             if device and installed:
                 _notify(4, 10, "Launch", "RUNNING")
                 self.adb.clear_logcat(device=device)
+                launch_start = time.time()
                 ok, _ = self.adb.launch_package(
                     apk_meta.package_name,
                     activity_name=apk_meta.launcher_activity,
@@ -234,11 +261,14 @@ class ScanPipeline:
                     if self.adb.is_running(apk_meta.package_name, device=device):
                         launched = True
                         break
+                launch_dur = round(time.time() - launch_start, 2)
                 if launched:
                     runtime_summary["Launch"] = "PASS"
+                    perf_stats["startup_status"] = f"Normal ({launch_dur}s)" if launch_dur < 3.0 else f"Slow ({launch_dur}s)"
                     _notify(4, 10, "Launch", "OK")
                 else:
                     runtime_summary["Launch"] = "FAIL"
+                    perf_stats["startup_status"] = "Launch Failed"
                     _notify(4, 10, "Launch", "WARN")
             else:
                 _notify(4, 10, "Launch", "SKIPPED")
@@ -260,6 +290,18 @@ class ScanPipeline:
             net_an = NetworkAnalyzer()
             all_findings.extend(net_an.analyze(apk_meta, scan_meta))
             scan_meta.analyzers_executed.append(net_an.name)
+
+            # AI Security Explanations (Part C)
+            try:
+                from sentinel.ai.config import AIConfig
+                from sentinel.ai.security_analyzer import SecurityAnalyzer
+                if AIConfig.from_env().enabled and all_findings:
+                    sec_an = SecurityAnalyzer()
+                    exps = sec_an.explain_all_findings(all_findings)
+                    security_explanations = [e.to_dict() for e in exps]
+            except Exception as e:
+                logger.warning(f"AI security explanation skipped or failed: {e}")
+
             _notify(5, 10, "Static analysis", "OK")
 
             # Setup AuthManager
@@ -296,9 +338,13 @@ class ScanPipeline:
                     status_cb=lambda msg: logger.info(f"[Explorer] {msg}"),
                 )
 
-                if exploration_res.auth_status != "SKIPPED":
-                    auth_status = exploration_res.auth_status
-                    auth_reason = exploration_res.auth_reason
+                if exploration_res:
+                    if exploration_res.auth_status not in ("SKIPPED", ""):
+                        auth_status = exploration_res.auth_status
+                        auth_reason = exploration_res.auth_reason
+                    else:
+                        exploration_res.auth_status = auth_status
+                        exploration_res.auth_reason = auth_reason
 
                 runtime_summary["UI Exploration"] = "PASS" if exploration_res.screens_discovered > 0 else "PARTIAL"
 
@@ -389,7 +435,27 @@ class ScanPipeline:
                 # Memory stats
                 mem_info = self.adb.get_memory_info(apk_meta.package_name, device=device)
                 if mem_info:
-                    perf_stats["memory_summary"] = ", ".join(f"{k}: {v}" for k, v in list(mem_info.items())[:3])
+                    valid_pairs = [
+                        f"{k}: {v}" for k, v in mem_info.items()
+                        if v and str(v).strip() and str(v).strip() not in (":", "Heap:", "PSS:", "null", "None")
+                    ]
+                    if valid_pairs:
+                        perf_stats["memory_summary"] = ", ".join(valid_pairs[:3])
+                    else:
+                        perf_stats["memory_summary"] = "Unavailable"
+                else:
+                    perf_stats["memory_summary"] = "Unavailable"
+
+                # AI Failure Analysis (Part C)
+                try:
+                    from sentinel.ai.config import AIConfig
+                    from sentinel.ai.failure_analyzer import FailureAnalyzer
+                    if AIConfig.from_env().enabled and raw_logcat:
+                        fail_an = FailureAnalyzer()
+                        f_res = fail_an.analyze_failures(raw_logcat, package_name=apk_meta.package_name)
+                        failure_analyses = [f.to_dict() for f in f_res]
+                except Exception as e:
+                    logger.warning(f"AI failure analysis skipped or failed: {e}")
 
                 _notify(8, 10, "Full exploration", f"DETAIL:{exploration_res.screens_fully_tested} screens explored;{exploration_res.actions_tested} actions tested" if exploration_res else "OK")
             else:
@@ -434,9 +500,7 @@ class ScanPipeline:
         except Exception:
             pass
 
-        _notify(10, 10, "Report generation", "OK")
-
-        return ScanExecutionResult(
+        scan_result = ScanExecutionResult(
             scan_id=scan_id,
             metadata=scan_meta,
             apk_meta=apk_meta,
@@ -454,5 +518,19 @@ class ScanPipeline:
             evidence_dir=report_base,
             screenshots=screenshots,
             log_files=log_files,
+            security_explanations=security_explanations,
+            failure_analyses=failure_analyses,
             duration_seconds=duration,
         )
+
+        # AI Report Generation integration (Phase 6B)
+        try:
+            from sentinel.ai.report_generator import ReportGenerator
+            report_gen = ReportGenerator()
+            scan_result.ai_report = report_gen.generate_report(scan_result)
+        except Exception as e:
+            logger.warning(f"AI report generation skipped or failed: {e}")
+
+        _notify(10, 10, "Report generation", "OK")
+
+        return scan_result

@@ -105,7 +105,7 @@ class RuntimeMonitor:
             result.findings.append(
                 Finding(
                     id="PERF_MAIN_THREAD_JANK",
-                    title="Startup main-thread jank (Skipped frames)",
+                    title="UI main-thread frame jank (Skipped frames)",
                     category=FindingCategory.PERFORMANCE,
                     severity=sev,
                     confidence=0.95,

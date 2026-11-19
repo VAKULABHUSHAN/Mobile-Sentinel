@@ -36,3 +36,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "real_device: marks tests requiring physical Android hardware",
+]

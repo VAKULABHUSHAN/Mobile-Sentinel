@@ -253,6 +253,32 @@ class StateGraph:
         }
 
 
+
+def calculate_action_coverage(actions_tested: int, actions_discovered: int) -> float:
+    """Calculates action coverage percentage cleanly and consistently.
+
+    Handles 0/0, partial coverage, complete coverage, and counts where tested exceeds discovered.
+    """
+    if actions_discovered <= 0:
+        return 0.0
+    if actions_tested <= 0:
+        return 0.0
+    if actions_tested >= actions_discovered:
+        return 100.0
+    return round((actions_tested / actions_discovered) * 100.0, 1)
+
+
+def calculate_screen_coverage(screens_tested: int, screens_discovered: int) -> float:
+    """Calculates screen coverage percentage cleanly and consistently."""
+    if screens_discovered <= 0:
+        return 0.0
+    if screens_tested <= 0:
+        return 0.0
+    if screens_tested >= screens_discovered:
+        return 100.0
+    return round((screens_tested / screens_discovered) * 100.0, 1)
+
+
 @dataclass
 class ExplorationResult:
     """Consolidated outcome of the UI exploration engine."""
@@ -264,12 +290,6 @@ class ExplorationResult:
     screens_explored: int = 0
     screens_fully_tested: int = 0
     screens_blocked: int = 0
-
-    def __post_init__(self) -> None:
-        if self.screens_fully_tested and not self.screens_explored:
-            self.screens_explored = self.screens_fully_tested
-        elif self.screens_explored and not self.screens_fully_tested:
-            self.screens_fully_tested = self.screens_explored
     actions_discovered: int = 0
     actions_tested: int = 0
     screen_coverage_pct: float = 0.0
@@ -281,6 +301,28 @@ class ExplorationResult:
     ui_issues: List[UIIssue] = field(default_factory=list)
     accessibility_issues: List[UIIssue] = field(default_factory=list)
     duration_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.screens_fully_tested and not self.screens_explored:
+            self.screens_explored = self.screens_fully_tested
+        elif self.screens_explored and not self.screens_fully_tested:
+            self.screens_fully_tested = self.screens_explored
+
+        if self.actions_tested > self.actions_discovered:
+            self.actions_discovered = self.actions_tested
+        if self.screens_explored > self.screens_discovered:
+            self.screens_discovered = self.screens_explored
+
+        # Ensure coverage calculations remain strictly consistent with actual counts
+        if self.actions_discovered > 0:
+            self.action_coverage_pct = calculate_action_coverage(self.actions_tested, self.actions_discovered)
+        else:
+            self.action_coverage_pct = 0.0
+
+        if self.screens_discovered > 0:
+            self.screen_coverage_pct = calculate_screen_coverage(self.screens_explored, self.screens_discovered)
+        else:
+            self.screen_coverage_pct = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {

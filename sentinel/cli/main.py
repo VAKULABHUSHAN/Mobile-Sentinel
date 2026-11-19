@@ -91,8 +91,32 @@ from sentinel.runtime.adb import ADBController
 @click.option("--no-ui", is_flag=True, help="Skip automated UI exploration.")
 @click.option("--no-network", is_flag=True, help="Skip offline network toggle test.")
 @click.option("--keep-installed", is_flag=True, help="Retain test application installed on device after run.")
-def test_cmd(apk_path: str, output: str, auth_config: Optional[str], no_ui: bool, no_network: bool, keep_installed: bool) -> None:
+@click.option("--ai/--no-ai", default=None, help="Enable or disable AI intelligence layer.")
+@click.option("--ai-provider", type=click.Choice(["gemini", "openai", "ollama", "mock"], case_sensitive=False), default=None, help="Select AI provider.")
+@click.option("--ai-model", type=str, default=None, help="Select specific AI model name.")
+@click.option("--format", "-f", "report_format", type=click.Choice(["all", "text", "json"], case_sensitive=False), default="all", help="Report format(s) to generate (all, text, json).")
+def test_cmd(
+    apk_path: str,
+    output: str,
+    auth_config: Optional[str],
+    no_ui: bool,
+    no_network: bool,
+    keep_installed: bool,
+    ai: Optional[bool] = None,
+    ai_provider: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    report_format: str = "all",
+) -> None:
     """Execute complete automated static and runtime security & QA audit."""
+    # Configure AI environment from CLI flags if specified
+    import os
+    if ai is not None:
+        os.environ["SENTINEL_AI_ENABLED"] = "true" if ai else "false"
+    if ai_provider is not None:
+        os.environ["SENTINEL_AI_PROVIDER"] = ai_provider.lower()
+    if ai_model is not None:
+        os.environ["SENTINEL_AI_MODEL"] = ai_model
+
     # 1. Check APK path existence cleanly
     path = Path(apk_path)
     if not path.exists():
@@ -187,14 +211,21 @@ def test_cmd(apk_path: str, output: str, auth_config: Optional[str], no_ui: bool
     txt_report_path = report_dir / "report.txt"
     json_report_path = report_dir / "report.json"
 
-    txt_gen = TextReportGenerator()
-    txt_gen.generate(result, txt_report_path)
+    fmt = (report_format or "all").lower()
 
-    json_gen = JsonReportGenerator()
-    json_gen.generate(result, json_report_path)
+    if fmt in ("all", "text"):
+        txt_gen = TextReportGenerator()
+        txt_gen.generate(result, txt_report_path)
+
+    if fmt in ("all", "json"):
+        json_gen = JsonReportGenerator()
+        json_gen.generate(result, json_report_path)
 
     click.echo("\nScan completed.\n")
-    click.echo(f"Report:\n{txt_report_path}\n")
+    if fmt in ("all", "text"):
+        click.echo(f"Report:\n{txt_report_path}\n")
+    if fmt == "json":
+        click.echo(f"Report:\n{json_report_path}\n")
 
 
 @cli.command("devices")

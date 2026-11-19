@@ -219,6 +219,280 @@ class EnvironmentDoctor:
             required=False,
         )
 
+    def check_connected_device(self, adb_result: Optional[ToolCheckResult] = None) -> ToolCheckResult:
+        """Inspects whether an Android device or emulator is connected and authorized."""
+        adb = adb_result or self.check_adb()
+        if not adb.found:
+            return ToolCheckResult(
+                name="Connected Device",
+                status=ToolStatus.SKIPPED,
+                found=False,
+                required=False,
+                details="ADB not available; device check skipped.",
+                remediation="Configure ADB to enable connected device inspection.",
+            )
+
+        code, out, _ = self._run_command([adb.path or "adb", "devices"])
+        if code != 0:
+            return ToolCheckResult(
+                name="Connected Device",
+                status=ToolStatus.DEGRADED,
+                found=False,
+                required=False,
+                details="Failed to query ADB for connected devices.",
+                remediation="Ensure ADB server is running (`adb start-server`).",
+            )
+
+        lines = out.splitlines()
+        devices: List[str] = []
+        unauthorized: List[str] = []
+        for line in lines[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                serial, state = parts[0], parts[1]
+                if state == "device":
+                    devices.append(serial)
+                elif state in ("unauthorized", "offline"):
+                    unauthorized.append(f"{serial} ({state})")
+
+        if devices:
+            return ToolCheckResult(
+                name="Connected Device",
+                status=ToolStatus.AVAILABLE,
+                found=True,
+                version=f"{len(devices)} device(s)",
+                details=f"Active device(s): {', '.join(devices)}",
+                required=False,
+            )
+        elif unauthorized:
+            return ToolCheckResult(
+                name="Connected Device",
+                status=ToolStatus.DEGRADED,
+                found=True,
+                version="Unauthorized",
+                details=f"Device found but not authorized: {', '.join(unauthorized)}",
+                required=False,
+                remediation="Accept the USB debugging authorization prompt on the device screen.",
+            )
+
+        return ToolCheckResult(
+            name="Connected Device",
+            status=ToolStatus.DEGRADED,
+            found=False,
+            required=False,
+            details="No connected Android devices or running emulators detected.",
+            remediation="Start an emulator via Android Studio or connect a physical device with USB debugging enabled.",
+        )
+
+    def check_apk_processing(self) -> ToolCheckResult:
+        """Checks availability of APK extraction dependencies and tooling."""
+        import zipfile
+        import xml.etree.ElementTree
+
+        aapt_path = shutil.which("aapt") or shutil.which("aapt2")
+        if not aapt_path:
+            candidate = self._find_sdk_tool("build-tools", "aapt")
+            if candidate and candidate.exists():
+                aapt_path = str(candidate)
+
+        if aapt_path:
+            return ToolCheckResult(
+                name="APK Processing",
+                status=ToolStatus.AVAILABLE,
+                found=True,
+                version="Full (zipfile+aapt)",
+                path=str(aapt_path),
+                details=f"Full APK extraction tooling active with aapt binary at {aapt_path}",
+                required=True,
+            )
+
+        return ToolCheckResult(
+            name="APK Processing",
+            status=ToolStatus.AVAILABLE,
+            found=True,
+            version="Standard (zipfile)",
+            details="Standard pure-Python APK extraction active (zipfile); aapt binary optional.",
+            required=True,
+            remediation="Install Android SDK Build-Tools for enhanced aapt badging extraction.",
+        )
+
+    def check_ai_config(self) -> ToolCheckResult:
+        """Inspects AI intelligence layer configuration and settings."""
+        try:
+            from sentinel.ai.config import AIConfig
+            cfg = AIConfig.from_env()
+            if cfg.enabled:
+                return ToolCheckResult(
+                    name="AI Configuration",
+                    status=ToolStatus.AVAILABLE,
+                    found=True,
+                    version=f"{cfg.provider}:{cfg.model}",
+                    details=f"AI Intelligence Layer enabled (Provider: '{cfg.provider}', Model: '{cfg.model}')",
+                    required=False,
+                )
+            return ToolCheckResult(
+                name="AI Configuration",
+                status=ToolStatus.AVAILABLE,
+                found=True,
+                version="Disabled",
+                details="AI Layer disabled (SENTINEL_AI_ENABLED=false). Local deterministic analysis active.",
+                required=False,
+                remediation="Set SENTINEL_AI_ENABLED=true in .env to activate AI screen understanding and reports.",
+            )
+        except Exception as e:
+            return ToolCheckResult(
+                name="AI Configuration",
+                status=ToolStatus.DEGRADED,
+                found=False,
+                details=f"Failed to load AI configuration: {e}",
+                required=False,
+                remediation="Verify syntax in .env file.",
+            )
+
+    def check_ai_provider(self, config: Optional[Any] = None) -> ToolCheckResult:
+        """Inspects availability and credentials for the selected AI provider."""
+        try:
+            from sentinel.ai.config import AIConfig
+            cfg = config or AIConfig.from_env()
+
+            if not cfg.enabled:
+                return ToolCheckResult(
+                    name="AI Provider",
+                    status=ToolStatus.SKIPPED,
+                    found=True,
+                    version="Skipped",
+                    details="AI Layer is disabled; provider availability check skipped.",
+                    required=False,
+                )
+
+            prov = (cfg.provider or "gemini").lower()
+            if prov == "mock":
+                return ToolCheckResult(
+                    name="AI Provider",
+                    status=ToolStatus.AVAILABLE,
+                    found=True,
+                    version="Mock Provider",
+                    details="MockLLMProvider active for offline test execution.",
+                    required=False,
+                )
+
+            if prov == "gemini":
+                key = cfg.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("AI_API_KEY")
+                if key and key.strip():
+                    return ToolCheckResult(
+                        name="AI Provider (Gemini)",
+                        status=ToolStatus.AVAILABLE,
+                        found=True,
+                        version=cfg.model,
+                        details="Gemini API credentials configured.",
+                        required=False,
+                    )
+                return ToolCheckResult(
+                    name="AI Provider (Gemini)",
+                    status=ToolStatus.DEGRADED,
+                    found=False,
+                    version="Missing Key",
+                    details="Gemini provider selected but GEMINI_API_KEY is not set.",
+                    required=False,
+                    remediation="Add GEMINI_API_KEY=your_key to .env or environment, or run with --no-ai.",
+                )
+
+            if prov == "openai":
+                key = cfg.api_key or os.environ.get("OPENAI_API_KEY")
+                if key and key.strip():
+                    return ToolCheckResult(
+                        name="AI Provider (OpenAI)",
+                        status=ToolStatus.AVAILABLE,
+                        found=True,
+                        version=cfg.model,
+                        details="OpenAI API credentials configured.",
+                        required=False,
+                    )
+                return ToolCheckResult(
+                    name="AI Provider (OpenAI)",
+                    status=ToolStatus.DEGRADED,
+                    found=False,
+                    version="Missing Key",
+                    details="OpenAI provider selected but OPENAI_API_KEY is not set.",
+                    required=False,
+                    remediation="Add OPENAI_API_KEY=your_key to .env or environment.",
+                )
+
+            if prov == "ollama":
+                import urllib.request
+                base_url = cfg.base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+                reachable = False
+                try:
+                    req = urllib.request.Request(f"{base_url.rstrip('/')}/api/tags", headers={"User-Agent": "SentinelDoctor"})
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        if resp.status == 200:
+                            reachable = True
+                except Exception:
+                    reachable = False
+
+                if reachable:
+                    return ToolCheckResult(
+                        name="AI Provider (Ollama)",
+                        status=ToolStatus.AVAILABLE,
+                        found=True,
+                        version=cfg.model,
+                        details=f"Ollama local daemon reachable at {base_url}.",
+                        required=False,
+                    )
+                return ToolCheckResult(
+                    name="AI Provider (Ollama)",
+                    status=ToolStatus.DEGRADED,
+                    found=False,
+                    version="Unreachable",
+                    details=f"Ollama daemon unreachable at {base_url}.",
+                    required=False,
+                    remediation=f"Start Ollama with `ollama serve` and ensure model '{cfg.model}' is pulled.",
+                )
+
+            return ToolCheckResult(
+                name="AI Provider",
+                status=ToolStatus.DEGRADED,
+                found=False,
+                details=f"Unrecognized AI provider '{cfg.provider}'.",
+                required=False,
+                remediation="Set provider to 'gemini', 'openai', 'ollama', or 'mock'.",
+            )
+        except Exception as e:
+            return ToolCheckResult(
+                name="AI Provider",
+                status=ToolStatus.DEGRADED,
+                found=False,
+                details=f"Error checking AI provider: {e}",
+                required=False,
+            )
+
+    def check_report_directory(self, target_dir: str = "reports") -> ToolCheckResult:
+        """Inspects read and write permissions for the reports output directory."""
+        p = Path(target_dir).resolve()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test_file = p / ".probe_write_perm"
+            test_file.write_text("probe", encoding="utf-8")
+            test_file.unlink()
+            return ToolCheckResult(
+                name="Report Directory",
+                status=ToolStatus.AVAILABLE,
+                found=True,
+                path=str(p),
+                details=f"Output directory is writable: {p}",
+                required=True,
+            )
+        except Exception as e:
+            return ToolCheckResult(
+                name="Report Directory",
+                status=ToolStatus.DEGRADED,
+                found=False,
+                path=str(p),
+                details=f"Cannot write to output directory {p}: {e}",
+                required=True,
+                remediation=f"Check write permissions on {p} or specify another directory with --output.",
+            )
+
     def _find_sdk_tool(self, subfolder: str, tool_name: str) -> Optional[Path]:
         """Locates a tool inside Android SDK directory."""
         sdk_root = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
@@ -231,19 +505,37 @@ class EnvironmentDoctor:
 
         ext = ".exe" if sys.platform == "win32" else ""
         candidate = Path(sdk_root) / subfolder / f"{tool_name}{ext}"
-        return candidate if candidate.exists() else None
+        if candidate.exists():
+            return candidate
+
+        # Also search for tools inside build-tools versioned subfolders (e.g. build-tools/34.0.0/aapt.exe)
+        sub_dir = Path(sdk_root) / subfolder
+        if sub_dir.exists() and sub_dir.is_dir():
+            for child in sorted(sub_dir.iterdir(), reverse=True):
+                if child.is_dir():
+                    tool_cand = child / f"{tool_name}{ext}"
+                    if tool_cand.exists():
+                        return tool_cand
+
+        return None
 
     def diagnose(self) -> EnvironmentReport:
         """Executes all system diagnostics and returns comprehensive EnvironmentReport."""
+        adb_res = self.check_adb()
         results: Dict[str, ToolCheckResult] = {
             "python": self.check_python(),
-            "adb": self.check_adb(),
+            "adb": adb_res,
+            "connected_device": self.check_connected_device(adb_res),
             "android_sdk": self.check_android_sdk(),
             "java": self.check_java(),
             "flutter": self.check_flutter(),
+            "apk_processing": self.check_apk_processing(),
+            "ai_config": self.check_ai_config(),
+            "ai_provider": self.check_ai_provider(),
+            "report_directory": self.check_report_directory(),
         }
 
-        # Static analysis readiness: requires Python; Java and SDK are helpful but static APK parsing can run with pure Python
+        # Static analysis readiness: requires Python; Java, SDK, and AI are optional
         ready_for_scan = results["python"].found and results["python"].status != ToolStatus.MISSING
 
         # Runtime readiness: requires ADB
@@ -267,28 +559,29 @@ class EnvironmentDoctor:
     @staticmethod
     def render_console_report(report: EnvironmentReport) -> str:
         """Formats the EnvironmentReport into a terminal display."""
-        # Use ASCII-safe indicators for robust cross-platform terminal rendering
         lines = [
             f"{Style.BRIGHT}================================================================{Style.RESET_ALL}",
             f"{Style.BRIGHT}                MOBILE SENTINEL - ENVIRONMENT DOCTOR            {Style.RESET_ALL}",
             f"{Style.BRIGHT}================================================================{Style.RESET_ALL}",
             "",
-            f"  {Style.BRIGHT}{'TOOL':<16} {'STATUS':<14} {'VERSION / DETAILS'}{Style.RESET_ALL}",
-            f"  {'-'*14}   {'-'*12}   {'-'*34}",
+            f"  {Style.BRIGHT}{'TOOL / SUBSYSTEM':<22} {'STATUS':<14} {'DETAILS'}{Style.RESET_ALL}",
+            f"  {'-'*20}   {'-'*12}   {'-'*26}",
         ]
 
         for _, tool in report.tools.items():
             if tool.status == ToolStatus.AVAILABLE:
-                status_str = f"{Fore.GREEN}[OK] AVAILABLE{Style.RESET_ALL}"
+                status_str = f"{Fore.GREEN}[PASS] OK     {Style.RESET_ALL}"
             elif tool.status == ToolStatus.DEGRADED:
-                status_str = f"{Fore.YELLOW}[WARN] DEGRADED{Style.RESET_ALL}"
+                status_str = f"{Fore.YELLOW}[WARN] WARNING{Style.RESET_ALL}"
+            elif tool.status == ToolStatus.SKIPPED:
+                status_str = f"{Fore.CYAN}[SKIP] SKIPPED{Style.RESET_ALL}"
             else:
-                status_str = f"{Fore.RED}[MISSING]     {Style.RESET_ALL}"
+                status_str = f"{Fore.RED}[FAIL] MISSING{Style.RESET_ALL}"
 
             info = tool.version or tool.details
             if len(info) > 42:
                 info = info[:39] + "..."
-            lines.append(f"  {tool.name:<16} {status_str:<23} {info}")
+            lines.append(f"  {tool.name:<22} {status_str:<23} {info}")
 
         lines.append("")
         lines.append(f"  Static Scan Readiness:  {Fore.GREEN if report.ready_for_scan else Fore.RED}{'READY' if report.ready_for_scan else 'NOT READY'}{Style.RESET_ALL}")
@@ -299,7 +592,7 @@ class EnvironmentDoctor:
         missing_remediations = [t for t in report.tools.values() if t.remediation]
         if missing_remediations:
             lines.append("")
-            lines.append(f"{Style.BRIGHT}Recommendations:{Style.RESET_ALL}")
+            lines.append(f"{Style.BRIGHT}Actionable Recommendations:{Style.RESET_ALL}")
             for t in missing_remediations:
                 lines.append(f"  - [{t.name}]: {t.remediation}")
 

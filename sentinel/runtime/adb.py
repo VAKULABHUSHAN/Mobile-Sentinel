@@ -351,11 +351,50 @@ class ADBController:
         """Captures process memory statistics via dumpsys meminfo."""
         self.validate_target_package(package_name)
         code, out, _ = self.run_shell(["dumpsys", "meminfo", package_name], device=device, timeout=15)
-        info = {}
-        if code == 0 and out:
-            for line in out.splitlines():
-                if "TOTAL PSS:" in line or "TOTAL:" in line or "Native Heap:" in line or "Dalvik Heap:" in line:
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        info[parts[0]] = parts[1]
+        info: Dict[str, str] = {}
+        if code != 0 or not out:
+            return info
+
+        def _format_kb(val_str: str) -> str:
+            clean = val_str.replace(",", "").strip()
+            try:
+                kb = int(clean)
+                if kb >= 1024:
+                    return f"{kb / 1024:.1f} MB"
+                return f"{kb} KB"
+            except (ValueError, TypeError):
+                return val_str
+
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            # App Summary and modern Android colon-separated format
+            # e.g.: "Native Heap:    15380    21450"
+            # e.g.: "TOTAL PSS:      44884    TOTAL RSS: 58214"
+            # e.g.: "TOTAL:          44884"
+            if ":" in line:
+                key_part, _, val_part = line.partition(":")
+                key = key_part.strip()
+                val_tokens = val_part.strip().split()
+                if not val_tokens:
+                    continue
+                first_num = val_tokens[0]
+                if first_num.isdigit() or first_num.replace(",", "").isdigit():
+                    formatted = _format_kb(first_num)
+                    if key in ("TOTAL PSS", "TOTAL"):
+                        info.setdefault("TOTAL PSS", formatted)
+                    elif key in ("Native Heap", "Dalvik Heap", "Java Heap", "Code", "Stack", "Graphics"):
+                        info.setdefault(key, formatted)
+            else:
+                # Table format: "Native Heap   15420  15380 ..." or "TOTAL   34560  32100 ..."
+                parts = line.split()
+                if len(parts) >= 2:
+                    if parts[0] == "TOTAL" and (parts[1].isdigit() or parts[1].replace(",", "").isdigit()):
+                        info.setdefault("TOTAL PSS", _format_kb(parts[1]))
+                    elif len(parts) >= 3 and f"{parts[0]} {parts[1]}" in ("Native Heap", "Dalvik Heap", "Java Heap"):
+                        if parts[2].isdigit() or parts[2].replace(",", "").isdigit():
+                            info.setdefault(f"{parts[0]} {parts[1]}", _format_kb(parts[2]))
+
         return info

@@ -78,6 +78,12 @@ class HierarchyParser:
             except Exception:
                 return None
 
+        # If target_package is specified, verify target package nodes exist in hierarchy
+        if target_package:
+            has_target = any((node.get("package") or "") == target_package for node in root.iter("node"))
+            if not has_target:
+                return None
+
         # System overlay / launcher packages to exclude
         system_packages = {
             "com.google.android.apps.nexuslauncher",

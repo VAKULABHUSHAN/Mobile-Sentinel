@@ -68,4 +68,5 @@ class ToolStatus(str, Enum):
     AVAILABLE = "AVAILABLE"
     MISSING = "MISSING"
     DEGRADED = "DEGRADED"
+    SKIPPED = "SKIPPED"
     UNKNOWN = "UNKNOWN"

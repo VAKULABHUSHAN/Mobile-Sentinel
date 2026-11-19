@@ -11,6 +11,8 @@ from sentinel.ui_testing.models import (
     UIAction,
     UIElement,
     UIIssue,
+    calculate_action_coverage,
+    calculate_screen_coverage,
 )
 from sentinel.ui_testing.safety import SafetyClassifier
 
@@ -27,4 +29,6 @@ __all__ = [
     "UIElement",
     "UIIssue",
     "ExplorationResult",
+    "calculate_action_coverage",
+    "calculate_screen_coverage",
 ]

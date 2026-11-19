@@ -18,6 +18,8 @@ from sentinel.ui_testing.models import (
     UIAction,
     UIElement,
     UIIssue,
+    calculate_action_coverage,
+    calculate_screen_coverage,
 )
 from sentinel.ui_testing.safety import SafetyClassifier
 
@@ -33,6 +35,7 @@ class UIExplorer:
         auth_manager: Optional[AuthManager] = None,
         safety_classifier: Optional[SafetyClassifier] = None,
         hierarchy_parser: Optional[HierarchyParser] = None,
+        exploration_advisor: Optional[Any] = None,
         max_depth: int = 15,
         max_actions_per_screen: int = 15,
         max_total_actions: int = 100,
@@ -45,6 +48,18 @@ class UIExplorer:
         self.safety_classifier = safety_classifier or SafetyClassifier()
         self.hierarchy_parser = hierarchy_parser or HierarchyParser(self.safety_classifier)
         self.auth_manager = auth_manager or AuthManager(adb=self.adb)
+
+        # Initialize or assign ExplorationAdvisor
+        self.exploration_advisor = exploration_advisor
+        if self.exploration_advisor is None:
+            try:
+                from sentinel.ai.config import AIConfig
+                from sentinel.ai.exploration_advisor import ExplorationAdvisor as EA
+                cfg = AIConfig.from_env()
+                if cfg.enabled:
+                    self.exploration_advisor = EA()
+            except Exception:
+                self.exploration_advisor = None
 
         self.adb.set_target_package(self.package_name)
         self.max_depth = max_depth
@@ -387,8 +402,8 @@ class UIExplorer:
 
         total_actions = 0
         screen_counter = 1
-        auth_status = "SKIPPED"
-        auth_reason = ""
+        auth_status = "BLOCKED" if not (self.auth_manager and self.auth_manager.has_credentials) else "SKIPPED"
+        auth_reason = "No authorized test credentials supplied" if auth_status == "BLOCKED" else ""
         authenticated_exploration = "NOT_STARTED"
         auth_attempted = False
         recovery_attempts = 0
@@ -655,6 +670,15 @@ class UIExplorer:
 
             # 7. Action Selection & Execution from State Pending Frontier
             if current_state.pending_action_ids and screen_actions_count < self.max_actions_per_screen:
+                # Consult ExplorationAdvisor if available and active to prioritize high-value actions
+                if self.exploration_advisor and getattr(self.exploration_advisor, "is_enabled", False):
+                    try:
+                        rec = self.exploration_advisor.recommend_next_action(current_state, graph)
+                        if rec:
+                            self.exploration_advisor.prioritize_pending_actions(current_state, rec)
+                    except Exception as e:
+                        logger.warning(f"[UIExplorer] ExplorationAdvisor error: {e}. Falling back to deterministic order.")
+
                 action_key = current_state.pending_action_ids[0]
                 elem, act_type = current_state.action_candidate_map[action_key]
 
@@ -809,9 +833,10 @@ class UIExplorer:
         )
         total_exec_actions = sum(len(s.explored_action_ids) for s in graph.states.values())
 
-        actions_disc = max(total_disc_actions, total_actions)
-        screen_cov = round((fully_tested / max(1, total_screens)) * 100, 1)
-        action_cov = round((total_exec_actions / max(1, actions_disc)) * 100, 1)
+        actions_tested = max(total_actions, total_exec_actions)
+        actions_disc = max(total_disc_actions, actions_tested)
+        screen_cov = calculate_screen_coverage(fully_tested, total_screens)
+        action_cov = calculate_action_coverage(actions_tested, actions_disc)
 
         if auth_status == "SUCCESS":
             authenticated_exploration = "COMPLETED" if fully_tested > 1 else "PARTIAL"
@@ -825,7 +850,7 @@ class UIExplorer:
             screens_fully_tested=fully_tested,
             screens_blocked=blocked,
             actions_discovered=actions_disc,
-            actions_tested=max(total_actions, total_exec_actions),
+            actions_tested=actions_tested,
             screen_coverage_pct=screen_cov,
             action_coverage_pct=action_cov,
             destructive_actions_discovered=len(graph.discovered_destructive_controls),
